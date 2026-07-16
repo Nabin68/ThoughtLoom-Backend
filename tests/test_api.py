@@ -174,7 +174,9 @@ class TestAdaptiveEndpoint:
         recorded = {}
         monkeypatch.setattr(
             "app.api.adaptive.answer_message",
-            lambda mid, text: recorded.update({"id": mid, "text": text}),
+            lambda mid, text, *, selections=None: recorded.update(
+                {"id": mid, "text": text, "selections": selections}
+            ),
         )
         model.replies = [json.dumps({"done": True})]
 
@@ -187,8 +189,80 @@ class TestAdaptiveEndpoint:
         )
 
         assert response.status_code == 200
-        assert recorded == {"id": "msg-3", "text": "The money"}
+        assert recorded == {"id": "msg-3", "text": "The money", "selections": None}
         assert response.json()["done"] is True
+
+    def test_a_multi_select_answer_arrives_joined_with_its_parts_intact(
+        self, client, chat_row, as_owner, model, db, loaded, monkeypatch
+    ):
+        """The wire contract: `text` is the whole answer, `selections` its parts.
+
+        Every existing reader of a chat uses `text` and must keep working
+        untouched, so a multi-select answer has to arrive as one string that
+        happens to also come with its seams.
+        """
+        recorded = {}
+        monkeypatch.setattr(
+            "app.api.adaptive.answer_message",
+            lambda mid, text, *, selections=None: recorded.update(
+                {"text": text, "selections": selections}
+            ),
+        )
+        model.replies = [json.dumps({"done": True})]
+
+        response = client.post(
+            "/api/adaptive-question",
+            json={
+                "chat_id": CHAT_ID,
+                "answer": {
+                    "message_id": "msg-3",
+                    "text": "I don't feel valued; She doesn't give me time",
+                    "selections": ["I don't feel valued", "She doesn't give me time"],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert recorded["text"] == "I don't feel valued; She doesn't give me time"
+        assert recorded["selections"] == [
+            "I don't feel valued",
+            "She doesn't give me time",
+        ]
+
+    def test_multi_reaches_the_client(
+        self, client, chat_row, as_owner, model, db, loaded
+    ):
+        model.replies = [
+            json.dumps(
+                {
+                    "done": False,
+                    "question": "Why does it feel like that?",
+                    "options": ["Not valued", "No time", "Same fight again"],
+                    "multi": True,
+                }
+            )
+        ]
+
+        response = client.post("/api/adaptive-question", json={"chat_id": CHAT_ID})
+
+        assert response.json()["multi"] is True
+
+    def test_a_question_that_says_nothing_about_multi_is_single_select(
+        self, client, chat_row, as_owner, model, db, loaded
+    ):
+        model.replies = [
+            json.dumps(
+                {
+                    "done": False,
+                    "question": "What is stopping you?",
+                    "options": ["Money", "Family"],
+                }
+            )
+        ]
+
+        response = client.post("/api/adaptive-question", json={"chat_id": CHAT_ID})
+
+        assert response.json()["multi"] is False
 
     def test_a_model_failure_is_a_502_with_a_readable_message(
         self, client, chat_row, as_owner, model, db, loaded

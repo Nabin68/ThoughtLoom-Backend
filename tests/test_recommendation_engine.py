@@ -11,6 +11,7 @@ from app.services.recommendation_engine import (
     follow_up,
     generate,
 )
+from tests.conftest import unwrapped
 
 CHAT = {"id": "chat-1", "user_id": "user-1", "category": "education"}
 
@@ -40,11 +41,18 @@ DO_SEARCH = json.dumps({"search": True, "queries": ["fees 2026 pune"]})
 
 ANSWER = json.dumps(
     {
+        "headline": "Finish the degree — but stop pretending it is why you are unhappy.",
         "recommendation": "Finish the degree, but stop pretending it is the point.",
         "next_steps": ["Talk to your head of department this week", "Apply anyway"],
         "confidence": "Fairly sure, unless the money is worse than you said.",
     }
 )
+
+
+def answer(**kwargs):
+    payload = json.loads(ANSWER)
+    payload.update(kwargs)
+    return json.dumps(payload)
 
 
 class TestSearchDecision:
@@ -175,6 +183,69 @@ class TestPersistence:
         assert db.of_type("recommendation") == []
 
 
+class TestHeadline:
+    """The verdict, printed large above the body.
+
+    It exists because the answer rendered as one grey paragraph reads like
+    nothing was decided. Some people will read this line and nothing else.
+    """
+
+    def test_it_is_carried_back_and_recorded(self, model, search, db):
+        model.replies = [NO_SEARCH, ANSWER]
+
+        result = generate(context())
+
+        assert result.headline == (
+            "Finish the degree — but stop pretending it is why you are unhappy."
+        )
+        # Persisted so history can render the verdict rather than guess at it
+        # from the body's first sentence.
+        assert db.of_type("recommendation")[0]["metadata"]["headline"] == result.headline
+
+    def test_it_is_trimmed(self, model, search, db):
+        model.replies = [NO_SEARCH, answer(headline="  Just finish it.  ")]
+
+        assert generate(context()).headline == "Just finish it."
+
+    @pytest.mark.parametrize("missing", ["", "   ", None])
+    def test_a_missing_headline_costs_the_headline_and_not_the_answer(
+        self, model, search, db, missing
+    ):
+        """The body is what they came for.
+
+        Failing a whole recommendation because its title did not arrive would
+        throw away the only part worth having.
+        """
+        model.replies = [NO_SEARCH, answer(headline=missing)]
+
+        result = generate(context())
+
+        assert result.headline == ""
+        assert result.text.startswith("Finish the degree")
+        assert db.of_type("recommendation")[0]["metadata"]["headline"] == ""
+
+    def test_a_headline_of_the_wrong_shape_is_no_headline(self, model, search, db):
+        # Trust the model for wording, never for shape.
+        model.replies = [NO_SEARCH, answer(headline=["Finish it.", "Or do not."])]
+
+        result = generate(context())
+
+        assert result.headline == ""
+        assert result.text
+
+    def test_an_answer_from_before_headlines_existed_still_works(
+        self, model, search, db
+    ):
+        # The field is additive: a model that ignores it returns the old shape,
+        # and the old shape is still an answer.
+        model.replies = [
+            NO_SEARCH,
+            json.dumps({"recommendation": "Finish the degree."}),
+        ]
+
+        assert generate(context()).headline == ""
+
+
 class TestFollowUp:
     def test_the_users_message_is_saved_before_the_model_is_called(
         self, model, search, db
@@ -233,10 +304,75 @@ class TestPromptInstructions:
 
         generate(context())
 
-        system = model.calls[1]["system"]
+        system = unwrapped(model.calls[1]["system"])
         assert "It depends" in system
         assert "Only you can decide" in system
         assert "Take a position" in system
+
+    def test_the_recommendation_prompt_is_ruthless(self, model, search, db):
+        model.replies = [NO_SEARCH, ANSWER]
+
+        generate(context())
+
+        system = unwrapped(model.calls[1]["system"])
+        assert "Be ruthless" in system
+        assert "Name the thing they are avoiding" in system
+        # The part that makes it useful rather than merely blunt: the user is
+        # sometimes the problem, and hearing so is the reason they came.
+        assert "If THEY are the problem, say so, plainly and early" in system
+        assert "Do not validate reflexively" in system
+        # And the bound on it.
+        assert "Be hard on the situation, never on the person" in system
+
+    def test_the_recommendation_prompt_is_ruthless_about_relationships(
+        self, model, search, db
+    ):
+        model.replies = [NO_SEARCH, ANSWER]
+
+        generate(context())
+
+        system = unwrapped(model.calls[1]["system"])
+        assert 'Do not soften a bad relationship into "communication issues"' in system
+        assert "If someone is being treated badly, say they are being treated badly" in system
+        # Pointed both ways: the person talking does not get the benefit of the
+        # doubt for being the one talking.
+        assert "If they have described themselves doing the mistreating" in system
+
+    def test_the_recommendation_prompt_bans_the_markdown_the_client_cannot_render(
+        self, model, search, db
+    ):
+        """The renderer handles one small subset and prints the rest literally.
+
+        Anything banned here that the model emits anyway arrives on the user's
+        screen as raw characters.
+        """
+        model.replies = [NO_SEARCH, ANSWER]
+
+        generate(context())
+
+        system = unwrapped(model.calls[1]["system"])
+        banned = system.split("BANNED. The renderer prints these")[1]
+        assert "tables" in banned
+        assert "links and images of any kind" in banned
+        assert "code fences and backticks" in banned
+        assert "HTML tags" in banned
+        # Underscores are literal because real text has snake_case in it.
+        assert "_underscores_ for emphasis" in banned
+        assert "nesting of any kind" in banned
+
+    def test_the_recommendation_prompt_describes_the_markdown_it_does_allow(
+        self, model, search, db
+    ):
+        model.replies = [NO_SEARCH, ANSWER]
+
+        generate(context())
+
+        system = unwrapped(model.calls[1]["system"])
+        assert "**bold** — the load-bearing phrase" in system
+        # Emphasis only works if it is rationed, and a model told to bold things
+        # will bold everything.
+        assert "Everything bold is nothing bold" in system
+        assert "> line — ONE callout, at most" in system
 
     def test_the_follow_up_prompt_keeps_the_ban(self, model, search, db):
         model.replies = ["ok"]
@@ -246,3 +382,17 @@ class TestPromptInstructions:
         system = model.calls[0]["system"]
         assert "it depends" in system.lower()
         assert "position" in system.lower()
+
+    def test_the_follow_up_prompt_stays_ruthless_under_pushback(
+        self, model, search, db
+    ):
+        model.replies = ["ok"]
+
+        follow_up(context(), "hm")
+
+        system = unwrapped(model.calls[0]["system"])
+        assert "Stay ruthless" in system
+        assert "Do not fold to be liked" in system
+        # Still a chat bubble: bold is the only markup that survives.
+        assert "Match their length" in system
+        assert "**Bold** is available" in system

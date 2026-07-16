@@ -61,6 +61,36 @@ where it earns its place — if they are circling the same decision a third time
 that is worth naming plainly rather than answering as though it were the first.
 Do not force it."""
 
+# What the client joins a multi-select answer with, and so what takes it back
+# apart. See AdaptiveAnswer in app/schemas/request_response.py, which defines
+# this separator as part of the wire contract.
+_MULTI_SEPARATOR = "; "
+
+
+def _selections(message: dict) -> list[str]:
+    """The distinct things a multi-select answer picked. Empty for a normal one.
+
+    Reads the answer back off the question's own metadata, because "multi" is a
+    property of what was asked. Falls back to splitting the answer text, which
+    is lossless by contract and covers rows the client wrote itself.
+
+    One selection returns nothing on purpose: rendering "chose several" over a
+    single tick would be a claim about the person that is not true.
+    """
+    metadata = message.get("metadata") or {}
+    if metadata.get("multi") is not True:
+        return []
+
+    selected = metadata.get("selected")
+    if isinstance(selected, list):
+        parts = [s.strip() for s in selected if isinstance(s, str)]
+    else:
+        parts = (message.get("answer_text") or "").split(_MULTI_SEPARATOR)
+        parts = [p.strip() for p in parts]
+
+    parts = [p for p in parts if p]
+    return parts if len(parts) > 1 else []
+
 
 @dataclass
 class ChatContext:
@@ -171,6 +201,10 @@ class ChatContext:
         volunteered this" carry different weight, and a model given an
         undifferentiated blob will treat a multiple-choice tap as though it
         were a confession.
+
+        A multi-select answer is marked and separated for the same reason: "she
+        does not give me time; I do not feel valued" read as one sentence is a
+        person hedging, and read as two ticks is two independent complaints.
         """
         lines = []
         for message in self.messages:
@@ -183,7 +217,11 @@ class ChatContext:
                 lines.append(f"A: {answer or '(skipped)'}")
             elif kind == "adaptive_question":
                 lines.append(f"Q (you asked): {question}")
-                lines.append(f"A: {answer or '(not yet answered)'}")
+                chosen = _selections(message)
+                if chosen:
+                    lines.append(f"A (chose several): {' | '.join(chosen)}")
+                else:
+                    lines.append(f"A: {answer or '(not yet answered)'}")
             elif kind == "free_text":
                 how = (message.get("metadata") or {}).get("input_method")
                 said = "said aloud" if how == "voice" else "wrote"

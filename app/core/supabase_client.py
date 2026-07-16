@@ -254,18 +254,50 @@ def insert_message(
     return result.data[0]
 
 
-def answer_message(message_id: str, answer_text: str) -> dict:
+def _metadata_of(message_id: str) -> dict:
+    """One message's metadata, for a caller about to write it back."""
+    try:
+        result = (
+            service_client()
+            .table("messages")
+            .select("metadata")
+            .eq("id", message_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SupabaseError(f"Could not read message {message_id}: {exc}") from exc
+    return ((result.data if result else None) or {}).get("metadata") or {}
+
+
+def answer_message(
+    message_id: str,
+    answer_text: str,
+    *,
+    selections: list[str] | None = None,
+) -> dict:
     """Fill in the answer on a question that was already asked.
 
     The question row is written when the model asks it, so the answer lands on
     that same row rather than a new one — one row per turn, and an unanswered
     question is visibly unanswered rather than missing.
+
+    [selections] are the options a multi-select answer ticked. [answer_text]
+    already carries them joined and remains what every reader uses; these are
+    kept so a later reader does not have to find the joins in a sentence.
     """
+    updates: dict = {"answer_text": answer_text}
+    if selections:
+        # An update replaces jsonb wholesale rather than merging into it, so the
+        # question's own options and round have to be carried across by hand or
+        # the answer erases the question it belongs to.
+        updates["metadata"] = {**_metadata_of(message_id), "selected": selections}
+
     try:
         result = (
             service_client()
             .table("messages")
-            .update({"answer_text": answer_text})
+            .update(updates)
             .eq("id", message_id)
             .execute()
         )

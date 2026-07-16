@@ -92,10 +92,12 @@ class FakeDb:
         self.messages.append(row)
         return row
 
-    def answer_message(self, message_id, answer_text):
+    def answer_message(self, message_id, answer_text, *, selections=None):
         for row in self.messages:
             if row["id"] == message_id:
                 row["answer_text"] = answer_text
+                if selections:
+                    row["metadata"] = {**row["metadata"], "selected": selections}
                 return row
         raise AssertionError(f"no such message {message_id}")
 

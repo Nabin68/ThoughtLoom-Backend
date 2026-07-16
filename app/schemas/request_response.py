@@ -7,9 +7,24 @@ from typing import Dict, Any, List, Optional
 # ---------------------------------------------------------------------------
 
 class AdaptiveAnswer(BaseModel):
-    """The answer to the question the previous call handed back."""
+    """The answer to the question the previous call handed back.
+
+    [text] is the canonical answer whether one option was picked or several: a
+    multi-select client sends the ticked options joined by "; ", in the order it
+    displayed them. That keeps "what the user said" in one required field, so
+    every reader of a chat — the transcript, the recommendation, memory — works
+    on multi-select answers without knowing multi-select exists.
+    """
     message_id: str = Field(..., description="id of the question row being answered")
     text: str = Field(..., min_length=1, description="A chosen option, or free text")
+    selections: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "The individual options ticked, when the question took several. "
+            "Redundant with `text` by construction, and kept so a later reader "
+            "does not have to infer where one choice ended and the next began."
+        ),
+    )
 
 
 class AdaptiveQuestionRequest(BaseModel):
@@ -34,6 +49,14 @@ class AdaptiveQuestionResponse(BaseModel):
             "own free-text fallback, so no 'other' option appears here."
         ),
     )
+    multi: bool = Field(
+        default=False,
+        description=(
+            "Whether this question takes more than one answer. Decided per "
+            "question by the model: several, where the options are not mutually "
+            "exclusive and forcing one would throw away most of the answer."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +73,20 @@ class RecommendationRequest(BaseModel):
 
 
 class RecommendationResponse(BaseModel):
-    recommendation: str
+    headline: str = Field(
+        default="",
+        description=(
+            "The verdict in one sentence, rendered large above the body. Empty "
+            "when the model gave none — the body is what matters, and a missing "
+            "headline is a worse-looking answer rather than no answer."
+        ),
+    )
+    recommendation: str = Field(
+        description=(
+            "The body, in a restricted Markdown subset: **bold**, *italic*, "
+            "## headings, - bullets, > callout. Nothing else renders."
+        ),
+    )
     next_steps: List[str] = Field(default_factory=list)
     confidence: str = ""
     sources: List[Source] = Field(

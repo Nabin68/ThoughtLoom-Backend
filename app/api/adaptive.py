@@ -42,7 +42,10 @@ async def adaptive_question(
             # Written before the model is called, so a model failure costs the
             # user a retry rather than the answer they just gave.
             await run_in_threadpool(
-                answer_message, request.answer.message_id, request.answer.text
+                answer_message,
+                request.answer.message_id,
+                request.answer.text,
+                selections=request.answer.selections,
             )
 
         context = await run_in_threadpool(load_context, chat)
@@ -64,4 +67,5 @@ async def adaptive_question(
         message_id=turn.message_id,
         question=turn.question,
         options=turn.options or [],
+        multi=turn.multi,
     )

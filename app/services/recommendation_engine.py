@@ -22,6 +22,12 @@ STATUS_AWAITING_FOLLOW_UP = "awaiting_follow_up"
 @dataclass
 class Recommendation:
     text: str
+
+    # The verdict in one sentence, rendered large above the body. Optional on
+    # purpose — see [generate]: a missing headline is a plainer-looking answer,
+    # and the answer is the thing worth having.
+    headline: str = ""
+
     next_steps: list[str] = field(default_factory=list)
     confidence: str = ""
     sources: list[SearchResult] = field(default_factory=list)
@@ -105,6 +111,14 @@ def generate(context: ChatContext) -> Recommendation:
 
         raise ModelError("Model returned an empty recommendation")
 
+    # Unlike the body, a missing headline is not worth failing over: the answer
+    # renders without one, and throwing away a good recommendation because its
+    # title did not arrive would cost the user the only part they came for.
+    raw_headline = result.get("headline")
+    headline = raw_headline.strip() if isinstance(raw_headline, str) else ""
+    if not headline:
+        logger.info("Chat %s: no headline from the model", context.chat["id"])
+
     steps = [
         s.strip()
         for s in (result.get("next_steps") or [])
@@ -117,6 +131,10 @@ def generate(context: ChatContext) -> Recommendation:
         type="recommendation",
         answer_text=text,
         metadata={
+            # Persisted rather than derived, so that history can render the
+            # verdict the same way the live screen did rather than guessing at
+            # a first sentence.
+            "headline": headline,
             "next_steps": steps,
             "confidence": confidence,
             # Kept so the client can show its work, and so a later reader can
@@ -132,6 +150,7 @@ def generate(context: ChatContext) -> Recommendation:
 
     return Recommendation(
         text=text,
+        headline=headline,
         next_steps=steps,
         confidence=confidence,
         sources=sources,

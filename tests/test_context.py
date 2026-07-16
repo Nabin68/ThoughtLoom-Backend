@@ -134,6 +134,101 @@ class TestRelatedInThePrompt:
         assert not context.is_first_chat
 
 
+class TestTranscript:
+    """How an answer reads to the model — one thing, or several at once."""
+
+    def _asked(self, **metadata):
+        return ChatContext(
+            chat=CHAT,
+            profile={},
+            messages=[
+                {
+                    "type": "adaptive_question",
+                    "question_text": "Why does it feel like that?",
+                    "answer_text": "I don't feel valued; She doesn't give me time",
+                    "metadata": {"options": ["a", "b"], **metadata},
+                }
+            ],
+        )
+
+    def test_a_single_select_answer_reads_exactly_as_it_always_has(self):
+        context = ChatContext(
+            chat=CHAT,
+            profile={},
+            messages=[
+                {
+                    "type": "adaptive_question",
+                    "question_text": "What is stopping you?",
+                    "answer_text": "The money",
+                    "metadata": {"options": ["The money"], "multi": False},
+                }
+            ],
+        )
+
+        # Byte-for-byte the old rendering. Several prompts are built on it.
+        assert "Q (you asked): What is stopping you?\nA: The money" in (
+            context.transcript()
+        )
+
+    def test_a_multi_select_answer_reads_as_several_distinct_things(self):
+        transcript = self._asked(
+            multi=True,
+            selected=["I don't feel valued", "She doesn't give me time"],
+        ).transcript()
+
+        # The point: these are two complaints that are both true, not one
+        # sentence in which someone hedged.
+        assert (
+            "A (chose several): I don't feel valued | She doesn't give me time"
+            in transcript
+        )
+
+    def test_selections_are_recovered_from_the_text_when_the_row_lacks_them(self):
+        # `text` is the contract — the selections joined, in display order — so
+        # a row written without the parts is not a row that lost them.
+        transcript = self._asked(multi=True).transcript()
+
+        assert (
+            "A (chose several): I don't feel valued | She doesn't give me time"
+            in transcript
+        )
+
+    def test_one_tick_on_a_multi_question_does_not_claim_several(self):
+        context = ChatContext(
+            chat=CHAT,
+            profile={},
+            messages=[
+                {
+                    "type": "adaptive_question",
+                    "question_text": "Why does it feel like that?",
+                    "answer_text": "I don't feel valued",
+                    "metadata": {"multi": True, "selected": ["I don't feel valued"]},
+                }
+            ],
+        )
+
+        # "chose several" over a single tick is a claim about the person that
+        # is not true.
+        assert "A: I don't feel valued" in context.transcript()
+        assert "chose several" not in context.transcript()
+
+    def test_an_unanswered_multi_question_is_still_unanswered(self):
+        context = ChatContext(
+            chat=CHAT,
+            profile={},
+            messages=[
+                {
+                    "type": "adaptive_question",
+                    "question_text": "Why does it feel like that?",
+                    "answer_text": None,
+                    "metadata": {"multi": True},
+                }
+            ],
+        )
+
+        assert "A: (not yet answered)" in context.transcript()
+
+
 class TestKeywords:
     def test_they_come_from_what_the_user_said(self):
         assert "brother" in context_with().keywords()

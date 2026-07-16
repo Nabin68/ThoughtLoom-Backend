@@ -6,6 +6,7 @@ import pytest
 
 from app.services.adaptive_engine import MAX_OPTIONS, _clean_options, next_question
 from app.services.context import ChatContext
+from tests.conftest import unwrapped
 
 CHAT = {"id": "chat-1", "user_id": "user-1", "category": "education"}
 
@@ -162,6 +163,107 @@ class TestModelOutput:
 
         with pytest.raises(ModelError):
             next_question(context())
+
+
+class TestMultiSelect:
+    """Whether a question takes one answer or several.
+
+    The product failure this fixes: asking "why do you feel like that?"
+    single-select, when depressed AND confused AND not valued are all true at
+    once, and keeping a quarter of the answer.
+    """
+
+    def test_a_multi_question_is_carried_to_the_client_and_the_row(self, model, db):
+        model.replies = [question(multi=True)]
+
+        turn = next_question(context())
+
+        assert turn.multi is True
+        # On the row as well as in the response: the transcript reads it back
+        # long after the client that drew the tick boxes has gone.
+        assert db.of_type("adaptive_question")[0]["metadata"]["multi"] is True
+
+    def test_single_select_is_the_default_when_the_model_says_nothing(self, model, db):
+        model.replies = [question()]
+
+        turn = next_question(context())
+
+        assert turn.multi is False
+        assert db.of_type("adaptive_question")[0]["metadata"]["multi"] is False
+
+    def test_an_explicit_false_stays_false(self, model, db):
+        model.replies = [question(multi=False)]
+
+        assert next_question(context()).multi is False
+
+    @pytest.mark.parametrize("junk", ["true", "yes", 1, ["yes"], {"multi": True}, None])
+    def test_anything_that_is_not_the_literal_true_is_single_select(
+        self, model, db, junk
+    ):
+        # A model that writes "true" has drifted out of the contract rather than
+        # decided something. The safe reading of a drifted field is the default:
+        # a wrongly-multi question invites a self-contradicting answer.
+        model.replies = [question(multi=junk)]
+
+        assert next_question(context()).multi is False
+
+    def test_a_pending_question_is_handed_back_still_multi(self, model, db):
+        """A retry must not turn a multi-select question into a single-select
+        one — the user would lose the answer they were halfway through."""
+        pending = [
+            {
+                "id": "msg-9",
+                "type": "adaptive_question",
+                "question_text": "Why does it feel like that?",
+                "answer_text": None,
+                "metadata": {"options": ["A", "B"], "multi": True},
+            }
+        ]
+
+        turn = next_question(context(messages=pending))
+
+        assert turn.multi is True
+        assert model.calls == []
+
+
+class TestPromptInstructions:
+    """The anti-restatement rule is the fix. Assert it is actually sent."""
+
+    def test_the_prompt_bans_asking_the_answer_back(self, model, db):
+        model.replies = [question()]
+
+        next_question(context())
+
+        system = unwrapped(model.calls[0]["system"])
+        # The failure it exists to stop: "I am tired" -> "why are you tired?"
+        assert "Never ask for a cause they have already named" in system
+        assert "Never ask them to elaborate on the last thing they said" in system
+        assert "Why are you tired?" in system
+        assert "Why is your head aching?" in system
+        # And the replacement: ask for the fact that explains it.
+        assert "Ask for the FACT that would explain the thing" in system
+
+    def test_the_prompt_explains_when_a_question_takes_several_answers(
+        self, model, db
+    ):
+        model.replies = [question()]
+
+        next_question(context())
+
+        system = unwrapped(model.calls[0]["system"])
+        assert '"multi": true when the options are not mutually exclusive' in system
+        assert '"multi": false when the question has exactly one true answer' in system
+
+    def test_the_prompt_is_ruthless_without_being_cruel(self, model, db):
+        model.replies = [question()]
+
+        next_question(context())
+
+        system = unwrapped(model.calls[0]["system"])
+        assert "BE RUTHLESS" in system
+        assert "Ask the question they are avoiding" in system
+        # The bound on it. Blunt is the product; cruelty is a bug.
+        assert "It does not mean cruel" in system
 
 
 class TestCleanOptions:

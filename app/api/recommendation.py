@@ -53,6 +53,7 @@ async def recommendation(
         raise HTTPException(status_code=500, detail=UNAVAILABLE)
 
     return RecommendationResponse(
+        headline=result.headline,
         recommendation=result.text,
         next_steps=result.next_steps,
         confidence=result.confidence,

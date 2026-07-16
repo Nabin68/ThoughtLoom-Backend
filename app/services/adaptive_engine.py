@@ -26,6 +26,12 @@ class AdaptiveTurn:
     question: str | None = None
     options: list[str] | None = None
 
+    # Whether this question takes several answers at once. Defaults off: a
+    # question wrongly shown as single-select loses part of an answer, while one
+    # wrongly shown as multi invites a contradiction, so the model has to ask
+    # for multi rather than fall into it.
+    multi: bool = False
+
 
 def _clean_options(raw) -> list[str]:
     """Trust the model for wording, never for shape.
@@ -69,12 +75,14 @@ def next_question(context: ChatContext) -> AdaptiveTurn:
     # leaving an orphan.
     pending = context.last_unanswered
     if pending is not None:
+        metadata = pending.get("metadata") or {}
         return AdaptiveTurn(
             done=False,
             round=asked,
             message_id=pending["id"],
             question=pending.get("question_text"),
-            options=(pending.get("metadata") or {}).get("options") or [],
+            options=metadata.get("options") or [],
+            multi=metadata.get("multi") is True,
         )
 
     remaining = MAX_ADAPTIVE_ROUNDS - asked
@@ -102,6 +110,10 @@ def next_question(context: ChatContext) -> AdaptiveTurn:
 
     question = (result.get("question") or "").strip()
     options = _clean_options(result.get("options"))
+    # Strictly true, never truthy: a model that writes "multi": "true" or 1 has
+    # not decided this question takes several answers, it has drifted out of the
+    # contract, and the safe reading of a drifted field is the default.
+    multi = result.get("multi") is True
 
     # A question with nothing to tap is not a question this UI can show. Rather
     # than invent options or crash the flow, treat it as the model having run
@@ -123,6 +135,11 @@ def next_question(context: ChatContext) -> AdaptiveTurn:
         answer_text=None,
         metadata={
             "options": options,
+            # Stored beside the options because it is a property of the question
+            # and not of the answer: it is what lets the transcript know an
+            # answer was several distinct things rather than one long one, long
+            # after the client that rendered the tick boxes has forgotten.
+            "multi": multi,
             "round": asked + 1,
             # Kept for debugging why the model asked what it asked. Never shown.
             "reason": (result.get("reason") or "")[:200],
@@ -135,6 +152,7 @@ def next_question(context: ChatContext) -> AdaptiveTurn:
         message_id=row["id"],
         question=question,
         options=options,
+        multi=multi,
     )
 
 
