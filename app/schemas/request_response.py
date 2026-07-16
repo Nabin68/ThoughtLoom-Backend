@@ -1,24 +1,102 @@
-# from pydantic import BaseModel
-# from typing import Dict, Any, List
-
-# class AnalyzeRequest(BaseModel):
-#     reason: str
-#     mcq_answers: Dict[str, Any]
-#     additional_context: str
-
-# class Insight(BaseModel):
-#     title: str
-#     explanation: str
-#     next_steps: List[str]
-#     caution: str
-
-# class AnalyzeResponse(BaseModel):
-#     summary: str
-#     insights: List[Insight]
-
-
 from pydantic import BaseModel, Field
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Adaptive questioning
+# ---------------------------------------------------------------------------
+
+class AdaptiveAnswer(BaseModel):
+    """The answer to the question the previous call handed back."""
+    message_id: str = Field(..., description="id of the question row being answered")
+    text: str = Field(..., min_length=1, description="A chosen option, or free text")
+
+
+class AdaptiveQuestionRequest(BaseModel):
+    chat_id: str = Field(..., description="The chat to continue")
+    answer: Optional[AdaptiveAnswer] = Field(
+        default=None,
+        description="Omitted on the first call of a chat; present on every later one.",
+    )
+
+
+class AdaptiveQuestionResponse(BaseModel):
+    done: bool = Field(..., description="True when the model has enough to advise")
+    round: int = Field(..., description="How many questions have been asked")
+    message_id: Optional[str] = Field(
+        default=None, description="Send this back with the answer"
+    )
+    question: Optional[str] = None
+    options: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Model-generated, specific to this user. The client always adds its "
+            "own free-text fallback, so no 'other' option appears here."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recommendation and the conversation after it
+# ---------------------------------------------------------------------------
+
+class Source(BaseModel):
+    title: str
+    url: str
+
+
+class RecommendationRequest(BaseModel):
+    chat_id: str
+
+
+class RecommendationResponse(BaseModel):
+    recommendation: str
+    next_steps: List[str] = Field(default_factory=list)
+    confidence: str = ""
+    sources: List[Source] = Field(
+        default_factory=list, description="Empty when the answer needed no research"
+    )
+    message_id: Optional[str] = None
+
+
+class FollowUpRequest(BaseModel):
+    chat_id: str
+    message: str = Field(..., min_length=1)
+
+
+class FollowUpResponse(BaseModel):
+    reply: str
+    message_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Finishing a chat: the title, and what we learned from it
+# ---------------------------------------------------------------------------
+
+class CompleteChatRequest(BaseModel):
+    chat_id: str = Field(..., description="The chat the user has just left")
+
+
+class CompleteChatResponse(BaseModel):
+    """Deliberately thin.
+
+    The naming and the memory merge happen *after* this response is sent, so
+    there is nothing here to report about them. The client has already left the
+    screen; it is not waiting on a title.
+    """
+    status: str = Field(..., description="The chat's status now")
+    scheduled: bool = Field(
+        ...,
+        description=(
+            "Whether naming and memory extraction were queued. False when this "
+            "chat has already been through both."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The original /api/analyze — predates the rest and is unchanged
+# ---------------------------------------------------------------------------
 
 class AnalyzeRequest(BaseModel):
     """Request model for analysis endpoint"""

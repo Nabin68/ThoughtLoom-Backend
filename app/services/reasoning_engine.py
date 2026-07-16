@@ -1,61 +1,55 @@
-# from app.core.llm import llm
-# from app.prompts.reasoning_prompt import PROMPT
-
-# def generate_insight(payload: dict) -> str:
-#     chain = PROMPT | llm
-#     return chain.invoke({
-#         "reason": payload["reason"],
-#         "mcq_answers": payload["mcq_answers"],
-#         "additional_context": payload["additional_context"],
-#     }).content
-
-
 import json
+import logging
+
 from app.core.llm import llm
 from app.prompts.reasoning_prompt import PROMPT
+
+logger = logging.getLogger(__name__)
+
+MAX_ATTEMPTS = 2
+
+
+class InsightGenerationError(RuntimeError):
+    """Raised when the model does not return usable structured insights."""
+
+
+def _extract_json(raw: str) -> dict:
+    """Parse the model's reply, tolerating markdown fences around the JSON."""
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end == -1:
+        raise json.JSONDecodeError("No JSON object in response", raw, 0)
+    return json.loads(raw[start : end + 1])
+
 
 def generate_insight(payload: dict) -> dict:
     """
     Generate structured insights from user input.
     Returns a dictionary with 'summary' and 'insights' keys.
+
+    Raises InsightGenerationError if the model never returns valid JSON.
     """
     chain = PROMPT | llm
-    
-    response = chain.invoke({
-        "reason": payload["reason"],
-        "mcq_answers": payload["mcq_answers"],
-        "additional_context": payload["additional_context"],
-    })
-    
-    raw_content = response.content.strip()
-    
-    # Try to parse as JSON
-    try:
-        # Remove markdown code blocks if present
-        if raw_content.startswith("```"):
-            # Find the first { and last }
-            start_idx = raw_content.find("{")
-            end_idx = raw_content.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                raw_content = raw_content[start_idx:end_idx + 1]
-        
-        parsed_result = json.loads(raw_content)
-        return parsed_result
-    
-    except json.JSONDecodeError:
-        # Fallback: return raw content in a structured format
-        return {
-            "summary": "We're analyzing your situation and preparing insights.",
-            "insights": [
-                {
-                    "title": "Analysis in Progress",
-                    "explanation": raw_content[:200] + "..." if len(raw_content) > 200 else raw_content,
-                    "next_steps": [
-                        "Review the insights carefully",
-                        "Take time to reflect on what resonates",
-                        "Start with one small action"
-                    ],
-                    "caution": "Remember, these are suggestions to consider, not rules to follow blindly."
-                }
-            ]
-        }
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        response = chain.invoke(
+            {
+                "reason": payload["reason"],
+                "mcq_answers": payload["mcq_answers"],
+                "additional_context": payload["additional_context"],
+            }
+        )
+        raw_content = response.content.strip()
+
+        try:
+            return _extract_json(raw_content)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Model returned non-JSON on attempt %d/%d: %r",
+                attempt,
+                MAX_ATTEMPTS,
+                raw_content[:500],
+            )
+
+    raise InsightGenerationError(
+        f"Model did not return valid JSON after {MAX_ATTEMPTS} attempts"
+    )

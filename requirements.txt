@@ -1,7 +1,16 @@
-fastapi
-uvicorn
-pydantic
-python-dotenv
-langchain
-langchain-cohere
-langgraph
+fastapi==0.128.0
+uvicorn==0.40.0
+pydantic==2.12.5
+python-dotenv==1.2.1
+langchain==1.2.7
+langchain-cohere==0.5.0
+
+# Server-side Supabase access with the service-role key: reading a chat's
+# context and writing the model's turns back. Never shipped to the client.
+supabase==2.31.0
+
+# Web search for the recommendation call. No API key and no billing account,
+# which is why it is the default — but it rate-limits and has no SLA, so
+# app/core/web_search.py treats every failure as "no results" rather than an
+# error. Swap the provider there, not at the call sites.
+ddgs==9.14.4
