@@ -61,9 +61,8 @@ not been given its keys yet still boots far enough to say so.
 | `POST /api/recommendation` | Researches if needed, takes a position, persists it |
 | `POST /api/follow-up` | One more turn of the conversation |
 | `POST /api/complete-chat` | The user left: close it, name it, remember it |
-| `POST /api/analyze` | The original prototype endpoint. Unused by the app, untouched |
 
-All except `/api/analyze` require `Authorization: Bearer <supabase access token>`.
+Every endpoint requires `Authorization: Bearer <supabase access token>`.
 
 The app's own reads and writes — the chat list, the search, the transcript — go
 straight to Supabase under RLS and are not here. Nothing reaches this service
@@ -194,7 +193,6 @@ app/
     titling.py               naming a finished chat
     memory.py                folding a finished chat into what we know
     recall.py                which past chats connect to this one
-    reasoning_engine.py      the original /api/analyze. Untouched
   prompts/            the actual instructions. These carry the product
   api/                the routes
   schemas/            request/response models

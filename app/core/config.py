@@ -36,9 +36,8 @@ SUPABASE_CONFIGURED = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 def require_supabase() -> tuple[str, str]:
     """Fail loudly, and only when a route that needs Supabase is actually hit.
 
-    Not at import: /health and the legacy /api/analyze work without it, and a
-    deployment that has not been given the keys yet should still boot far
-    enough to say so.
+    Not at import: /health works without it, and a deployment that has not
+    been given the keys yet should still boot far enough to say so.
     """
     return _require("SUPABASE_URL"), _require("SUPABASE_SERVICE_ROLE_KEY")
 

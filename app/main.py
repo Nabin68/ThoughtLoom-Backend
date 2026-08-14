@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.adaptive import router as adaptive_router
-from app.api.analyze import router as analyze_router
 from app.api.completion import router as completion_router
 from app.api.recommendation import router as recommendation_router
 
@@ -31,13 +30,12 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    # Authorization joins the list because every endpoint below /api except the
-    # legacy analyze one now carries the caller's Supabase access token. Without
-    # it a browser build would fail CORS preflight before the request left.
+    # Authorization joins the list because every endpoint below /api carries the
+    # caller's Supabase access token. Without it a browser build would fail CORS
+    # preflight before the request left.
     allow_headers=["Content-Type", "Authorization"],
 )
 
-app.include_router(analyze_router, prefix="/api", tags=["Analysis"])
 app.include_router(adaptive_router, prefix="/api", tags=["Conversation"])
 app.include_router(recommendation_router, prefix="/api", tags=["Conversation"])
 app.include_router(completion_router, prefix="/api", tags=["Conversation"])
@@ -54,7 +52,6 @@ async def root():
             "recommendation": "/api/recommendation",
             "follow_up": "/api/follow-up",
             "complete_chat": "/api/complete-chat",
-            "analyze": "/api/analyze",
             "health": "/health"
         }
     }

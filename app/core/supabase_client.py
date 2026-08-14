@@ -25,7 +25,7 @@ def service_client() -> Client:
     """The service-role client, built once.
 
     Cached rather than global so that import does not require configuration —
-    /health and the legacy /api/analyze run without Supabase at all.
+    /health runs without Supabase at all.
     """
     url, key = require_supabase()
     return create_client(url, key)

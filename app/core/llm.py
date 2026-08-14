@@ -121,24 +121,3 @@ def set_model(model: LanguageModel | None) -> None:
     """Swap the model. For tests, and for wiring a different provider in."""
     global _model
     _model = model
-
-
-def __getattr__(name: str):
-    """Keeps `from app.core.llm import llm` working for the original
-    /api/analyze chain, which pipes a LangChain prompt into it (`PROMPT | llm`)
-    and so needs a real Runnable, not a wrapper.
-
-    A module-level __getattr__ (PEP 562) makes that import lazy. It used to run
-    at import time and raise without a key, which meant importing anything in
-    this module — including the interface above — required a Cohere key. Tests
-    and `/health` should not.
-    """
-    if name == "llm":
-        from langchain_cohere import ChatCohere
-
-        if not os.getenv("COHERE_API_KEY"):
-            raise RuntimeError(
-                "COHERE_API_KEY is not set. Copy .env.example to .env and add your key."
-            )
-        return ChatCohere(model=COHERE_MODEL)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
