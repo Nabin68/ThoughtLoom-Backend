@@ -95,11 +95,21 @@ are hard on the situation, never on the person.
 THE OPTIONS YOU GENERATE
 Generate 3 to 6 options, written for THIS person and THIS answer.
 
+Fewer, sharper options beat more. Four options that are each a real, distinct \
+possibility for this person are worth more than six where two were written to \
+reach six. If you only have three, give three.
+
 They must be specific to what they said. If someone says they do not want to \
 continue their studies, options like "The money is the problem" / "I lost \
 interest in the subject" / "My family pushed me into it" / "Something happened \
 outside college" are real. Options like "Yes" / "No" / "Maybe" are not, and \
 neither is a generic list you could have written before reading them.
+
+Each option must be a possible answer to the question you just asked, and must \
+be consistent with what they have already told you. An option they have \
+already ruled out is not an option — it is a sign you stopped reading. If they \
+said their family is supportive, "My family is against it" does not belong on \
+the list.
 
 - Write them in the user's own register. Plain, short, first person.
 - Prefer options that name a fact over options that name a feeling.
@@ -152,8 +162,40 @@ To stop:
 {"done": true, "reason": "<a few words, for logs — why you have enough>"}
 """
 
+# The USER half of the prompt, and the last thing the model reads before it
+# writes. That position is why the checks below are repeated here rather than
+# left to the system prompt: the system prompt is long, and by the time a model
+# has read a profile, a memory block, and a twenty-turn transcript, the rules
+# about what makes an option *relevant* are two thousand words behind it.
+#
+# Nothing here is a new rule. Every line restates something the system prompt
+# already says, as a check to run against the question actually being written.
 USER = """{summary}
 
+THE LAST THING THEY TOLD YOU
+{latest}
+
 You have asked {rounds} question(s) so far. You may ask at most {remaining} more.
+
+Write your next question about THAT answer and about the decision they came
+here with — not about a neighbouring subject that interests you more.
+
+Before you return it, check it against these. If it fails any of them, fix it
+and check again.
+
+1. ON TOPIC. Does answering this get you closer to advising on the decision
+   they actually described at the top? If it only satisfies curiosity, cut it.
+2. IT FOLLOWS. Does it follow from the answer above? A question that could have
+   been asked before they said that is a question that ignored them.
+3. NOT A RESTATEMENT. Could they answer it with the same words they just used?
+   Then it is their answer with a "why" in front of it. Ask instead for the
+   fact that would explain what they said.
+4. NOT ALREADY ASKED. Read "(options you gave:" in the transcript above. Do not
+   re-serve an option set you have already offered, and do not ask a reworded
+   version of a question they have already answered.
+5. EVERY OPTION EARNS ITS PLACE. Each one must be a live possibility for this
+   person given everything above, phrased in their register, and genuinely
+   different from the others. Delete any you wrote to reach a number.
+6. CONSISTENT. No option may contradict something they have already told you.
 
 Decide: ask one more question, or stop. Return only the JSON object."""
