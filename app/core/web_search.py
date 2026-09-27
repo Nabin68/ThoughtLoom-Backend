@@ -36,6 +36,10 @@ class WebSearch(ABC):
 
 class DuckDuckGoSearch(WebSearch):
     def search(self, query: str, *, limit: int = WEB_SEARCH_RESULTS) -> list[SearchResult]:
+        # The whole thing is one fail-soft block, parsing included: a hit whose
+        # shape has drifted (a library update, an ad slot with no "body") must
+        # cost this one query, not turn a soft "search found nothing" into a
+        # hard failure of the recommendation it was only ever grounding.
         try:
             # Imported lazily: the package is optional, and this service must
             # still boot and answer without it.
@@ -43,18 +47,18 @@ class DuckDuckGoSearch(WebSearch):
 
             with DDGS() as ddgs:
                 hits = list(ddgs.text(query, max_results=limit))
-        except Exception as exc:  # noqa: BLE001 — rate limits, network, import
+
+            results = []
+            for hit in hits:
+                title = (hit.get("title") or "").strip()
+                snippet = (hit.get("body") or "").strip()
+                url = (hit.get("href") or hit.get("url") or "").strip()
+                if snippet and url:
+                    results.append(SearchResult(title=title, snippet=snippet, url=url))
+            return results
+        except Exception as exc:  # noqa: BLE001 — rate limits, network, import, shape drift
             logger.warning("Web search failed for %r: %s", query, exc)
             return []
-
-        results = []
-        for hit in hits:
-            title = (hit.get("title") or "").strip()
-            snippet = (hit.get("body") or "").strip()
-            url = (hit.get("href") or hit.get("url") or "").strip()
-            if snippet and url:
-                results.append(SearchResult(title=title, snippet=snippet, url=url))
-        return results
 
 
 class NullSearch(WebSearch):

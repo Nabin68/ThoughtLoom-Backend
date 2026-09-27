@@ -174,8 +174,8 @@ class TestAdaptiveEndpoint:
         recorded = {}
         monkeypatch.setattr(
             "app.api.adaptive.answer_message",
-            lambda mid, text, *, selections=None: recorded.update(
-                {"id": mid, "text": text, "selections": selections}
+            lambda mid, text, *, chat_id, selections=None: recorded.update(
+                {"id": mid, "text": text, "chat_id": chat_id, "selections": selections}
             ),
         )
         model.replies = [json.dumps({"done": True})]
@@ -189,7 +189,12 @@ class TestAdaptiveEndpoint:
         )
 
         assert response.status_code == 200
-        assert recorded == {"id": "msg-3", "text": "The money", "selections": None}
+        assert recorded == {
+            "id": "msg-3",
+            "text": "The money",
+            "chat_id": CHAT_ID,
+            "selections": None,
+        }
         assert response.json()["done"] is True
 
     def test_a_multi_select_answer_arrives_joined_with_its_parts_intact(
@@ -204,7 +209,7 @@ class TestAdaptiveEndpoint:
         recorded = {}
         monkeypatch.setattr(
             "app.api.adaptive.answer_message",
-            lambda mid, text, *, selections=None: recorded.update(
+            lambda mid, text, *, chat_id, selections=None: recorded.update(
                 {"text": text, "selections": selections}
             ),
         )
@@ -228,6 +233,32 @@ class TestAdaptiveEndpoint:
             "I don't feel valued",
             "She doesn't give me time",
         ]
+
+    def test_a_whitespace_only_answer_is_rejected_before_anything_runs(
+        self, client, chat_row, as_owner, model, monkeypatch
+    ):
+        """min_length counts characters, and " " has one. Without the
+        validator this would be stored as the answer — falsy in Python, so
+        adaptive_engine.last_unanswered would read the question as answered
+        forever without ever having been.
+        """
+        recorded = {}
+        monkeypatch.setattr(
+            "app.api.adaptive.answer_message",
+            lambda *a, **k: recorded.update({"called": True}),
+        )
+
+        response = client.post(
+            "/api/adaptive-question",
+            json={
+                "chat_id": CHAT_ID,
+                "answer": {"message_id": "msg-3", "text": "   "},
+            },
+        )
+
+        assert response.status_code == 422
+        assert recorded == {}
+        assert model.calls == []
 
     def test_multi_reaches_the_client(
         self, client, chat_row, as_owner, model, db, loaded

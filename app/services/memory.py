@@ -136,12 +136,21 @@ def merge_from_chat(context: ChatContext, *, user_id: str) -> bool:
     )
 
     changed = False
+    suspected_failure = False
     for section_key, scope, existing in (
         ("global", None, global_row),
         ("topic", category, topic_row),
     ):
         merged = _merged(result.get(section_key), existing)
         if merged is None:
+            # _merged already warned when this looks like a bad generation
+            # rather than a legitimately empty one — see its docstring. That
+            # same distinction decides whether this chat is done or should be
+            # retried, below.
+            if existing and (
+                (existing.get("facts") or []) or (existing.get("summary") or "").strip()
+            ):
+                suspected_failure = True
             continue
         summary, facts = merged
         upsert_memory(user_id=user_id, category=scope, summary=summary, facts=facts)
@@ -153,8 +162,19 @@ def merge_from_chat(context: ChatContext, *, user_id: str) -> bool:
             scope or "global",
         )
 
-    # Marked whatever the model produced. A merge that legitimately learned
-    # nothing is finished with this chat, and re-running it on every visit to
-    # history would pay for the same answer forever.
-    mark_memory_merged(context.chat["id"])
+    if changed or not suspected_failure:
+        # Marked whatever the model produced. A merge that legitimately
+        # learned nothing is finished with this chat, and re-running it on
+        # every visit to history would pay for the same answer forever.
+        mark_memory_merged(context.chat["id"])
+    else:
+        # The opposite case: a person who already had memory got nothing back
+        # for at least one section, which _merged treats as a bad generation,
+        # not "nothing to add". Leaving memory_merged_at unset is what lets
+        # _wrap_up (app/api/completion.py) try again on this chat's next visit
+        # to history, instead of losing it here for good.
+        logger.warning(
+            "Chat %s: not marking merged — retry may recover what this run lost",
+            context.chat["id"],
+        )
     return changed

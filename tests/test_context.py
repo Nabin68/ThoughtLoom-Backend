@@ -46,12 +46,32 @@ class TestColdStart:
         assert "EARLIER CONVERSATIONS" not in summary
         assert "nothing yet" not in summary.lower()
 
-    def test_a_new_users_prompt_is_the_one_from_before_this_feature_existed(self):
+    def test_a_new_users_prompt_carries_no_trace_of_memory_or_recall(self):
+        """The whole prompt, asserted exactly.
+
+        This used to read "the prompt from before this feature existed", and
+        checked that a cold user's prompt was byte-for-byte the pre-memory one.
+        The prompt has since gained a block that restates the user's own
+        description just before the transcript — for *everybody*, cold or not —
+        so that string is no longer the right expectation.
+
+        What the test is actually for survives unchanged: nothing about memory
+        or past conversations may appear for someone who has neither, and no
+        "(nothing yet)" placeholder may stand in for them. Asserting the whole
+        string rather than a handful of `not in`s is still the point, because
+        it is what catches a block nobody thought to check for.
+        """
         summary = context_with().summary()
 
         assert summary == (
             "WHO THEY ARE:\n- (nothing recorded)\n\n"
             "TOPIC: financial\n\n"
+            "WHAT THEY CAME HERE WITH, IN THEIR OWN WORDS\n"
+            "This is the decision. Everything you ask must serve it. It is "
+            "repeated here on\nits own because it is the one thing in this "
+            "prompt that is easiest to drift away\nfrom once the profile and "
+            "the scripted answers are in front of you.\n\n"
+            '"I keep lending my brother money and he never pays it back."\n\n'
             "THE CONVERSATION SO FAR:\n"
             'They wrote: "I keep lending my brother money and he never pays it back."'
         )
@@ -151,7 +171,7 @@ class TestTranscript:
             ],
         )
 
-    def test_a_single_select_answer_reads_exactly_as_it_always_has(self):
+    def test_a_single_select_answer_is_never_reported_as_several(self):
         context = ChatContext(
             chat=CHAT,
             profile={},
@@ -164,11 +184,19 @@ class TestTranscript:
                 }
             ],
         )
+        transcript = context.transcript()
 
-        # Byte-for-byte the old rendering. Several prompts are built on it.
-        assert "Q (you asked): What is stopping you?\nA: The money" in (
-            context.transcript()
-        )
+        # The rendering now carries the option list the model offered, so that
+        # it can see its own earlier choice sets and stop re-serving them. The
+        # question and the answer are therefore no longer adjacent lines, which
+        # is what this used to assert.
+        #
+        # What must not change is the claim being made about the person: one
+        # tick is one answer, and "chose several" over it would be a statement
+        # about them that is not true.
+        assert "Q (you asked): What is stopping you?" in transcript
+        assert "A: The money" in transcript
+        assert "chose several" not in transcript
 
     def test_a_multi_select_answer_reads_as_several_distinct_things(self):
         transcript = self._asked(

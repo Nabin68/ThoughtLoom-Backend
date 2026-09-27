@@ -182,6 +182,43 @@ class TestPersistence:
 
         assert db.of_type("recommendation") == []
 
+    def test_a_retry_after_the_recommendation_already_landed_is_not_regenerated(
+        self, model, search, db
+    ):
+        """The other half of the empty-recommendation test above: a *dropped
+        response* rather than a real failure. The chat already has its answer;
+        a retry must hand that back, not run the whole pipeline — and pay for
+        a second model call and search — again.
+        """
+        prior = [
+            {
+                "id": "msg-99",
+                "type": "recommendation",
+                "answer_text": "Finish the degree.",
+                "metadata": {
+                    "headline": "Finish it.",
+                    "next_steps": ["Talk to your head of department"],
+                    "confidence": "Fairly sure.",
+                    "sources": [{"title": "Fees 2026", "url": "https://example.edu/fees"}],
+                    "searched": True,
+                },
+            }
+        ]
+
+        result = generate(context(messages=prior))
+
+        assert result.text == "Finish the degree."
+        assert result.headline == "Finish it."
+        assert result.next_steps == ["Talk to your head of department"]
+        assert result.message_id == "msg-99"
+        assert result.sources == [
+            SearchResult(title="Fees 2026", snippet="", url="https://example.edu/fees")
+        ]
+        # No new row, and no model call — the empty reply queue proves the
+        # model was never asked; FakeModel raises if it is.
+        assert db.of_type("recommendation") == []
+        assert model.calls == []
+
 
 class TestHeadline:
     """The verdict, printed large above the body.
@@ -265,6 +302,27 @@ class TestFollowUp:
         saved = db.of_type("free_text")
         assert saved[-1]["answer_text"] == "But I cannot afford another year."
         assert db.of_type("assistant_reply") == []
+
+    def test_a_retry_with_the_same_pending_message_does_not_duplicate_it(
+        self, model, search, db
+    ):
+        """The message was saved on a first attempt whose reply never arrived
+        back at the client. A retry sends the identical text again — it must
+        get its reply this time, not a second copy of the same turn."""
+        model.replies = ["Then do not do another year."]
+        prior = [
+            {
+                "type": "free_text",
+                "answer_text": "But I cannot afford another year.",
+                "metadata": {"input_method": "typed"},
+            }
+        ]
+
+        follow_up(context(messages=prior), "But I cannot afford another year.")
+
+        # Nothing new written for the user's turn — it was already there.
+        assert db.of_type("free_text") == []
+        assert len(db.of_type("assistant_reply")) == 1
 
     def test_a_reply_is_saved_as_its_own_type(self, model, search, db):
         model.replies = ["Then do not do another year. Here is what I would do."]

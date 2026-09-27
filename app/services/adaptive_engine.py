@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from app.core.config import MAX_ADAPTIVE_ROUNDS
 from app.core.llm import ModelError, get_model
 from app.core.supabase_client import insert_message
+from app.core.timing import timed
 from app.prompts import adaptive_prompt
 from app.services.context import ChatContext
 
@@ -90,14 +91,27 @@ def next_question(context: ChatContext) -> AdaptiveTurn:
         logger.info("Chat %s hit the round cap", context.chat["id"])
         return AdaptiveTurn(done=True, round=asked)
 
-    result = get_model().complete_json(
-        system=adaptive_prompt.SYSTEM,
-        user=adaptive_prompt.USER.format(
-            summary=context.summary(),
-            rounds=asked,
-            remaining=remaining,
-        ),
+    user_prompt = adaptive_prompt.USER.format(
+        summary=context.summary(),
+        # The last thing they said, repeated at the end of the prompt where the
+        # model is actually writing from. See ChatContext.latest_answer.
+        latest=context.latest_answer(),
+        rounds=asked,
+        remaining=remaining,
     )
+    logger.info(
+        "Chat %s: question prompt is %d chars (%d system, %d user)",
+        context.chat["id"],
+        len(adaptive_prompt.SYSTEM) + len(user_prompt),
+        len(adaptive_prompt.SYSTEM),
+        len(user_prompt),
+    )
+
+    with timed("adaptive: model"):
+        result = get_model().complete_json(
+            system=adaptive_prompt.SYSTEM,
+            user=user_prompt,
+        )
 
     if result.get("done") is True:
         logger.info(

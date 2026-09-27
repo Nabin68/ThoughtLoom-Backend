@@ -130,9 +130,20 @@ def find_related(
     category: str,
     keywords: list[str],
     limit: int = MAX_RELATED,
+    candidates: list[dict] | None = None,
 ) -> list[RelatedChat]:
-    """The past chats worth mentioning in this one. Empty for a new user."""
-    candidates = fetch_past_chats(user_id, exclude_chat_id=chat_id, limit=MAX_CANDIDATES)
+    """The past chats worth mentioning in this one. Empty for a new user.
+
+    [candidates] lets a caller that has already read this user's past chats
+    hand them over instead of paying for the query twice. The list of past
+    chats does not depend on anything else this function reads, so
+    `load_context` fetches it alongside the profile and the transcript rather
+    than waiting for its turn — see app/core/concurrency.py.
+    """
+    if candidates is None:
+        candidates = fetch_past_chats(
+            user_id, exclude_chat_id=chat_id, limit=MAX_CANDIDATES
+        )
     if not candidates:
         return []
 

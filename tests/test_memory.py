@@ -167,6 +167,11 @@ class TestNotLosingMemory:
 
         assert db.memory[0]["facts"] == ["Sends 12k home."]
         assert db.memory[0]["summary"] == "Supports her family."
+        # Not marked merged: completion.py's _wrap_up only retries a chat
+        # whose memory_merged_at is unset, and this generation lost whatever
+        # this chat specifically could have added. Marking it here would
+        # close off the only chance to recover that on a later visit.
+        assert db.merged == []
 
     def test_a_malformed_section_does_not_erase_what_we_knew(self, model, db):
         db.remember(OWNER, None, facts=["Sends 12k home."])
@@ -175,6 +180,7 @@ class TestNotLosingMemory:
         merge_from_chat(context_with(), user_id=OWNER)
 
         assert db.memory[0]["facts"] == ["Sends 12k home."]
+        assert db.merged == []
 
     def test_an_empty_merge_for_a_new_user_writes_nothing_rather_than_a_blank_row(
         self, model, db

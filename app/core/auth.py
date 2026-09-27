@@ -17,6 +17,8 @@ longer enforce it.
 """
 
 import logging
+import os
+import time
 
 from fastapi import Header, HTTPException
 
@@ -26,6 +28,54 @@ logger = logging.getLogger(__name__)
 
 _UNAUTHORIZED = "Please sign in again."
 _FORBIDDEN = "That conversation is not yours."
+
+# How long a verified token is trusted without asking Supabase again.
+#
+# Verifying costs a network round trip to Supabase Auth, and it happens on
+# *every* request — in front of the question the user is waiting on. The same
+# token arrives a dozen times in a single conversation and the answer is the
+# same every time.
+#
+# The trade is revocation latency: for up to this long, a user who signed out
+# on another device can still reach this service. A minute is short against a
+# session that lasts hours and long enough to take the round trip off nearly
+# every request. Set AUTH_CACHE_SECONDS=0 to go back to verifying every time.
+_CACHE_SECONDS = float(os.getenv("AUTH_CACHE_SECONDS", "60"))
+
+# ponytail: a plain dict with a size cap, not an LRU. One process, one small
+# user base; if this ever runs at a size where the cap starts evicting live
+# sessions, swap it for cachetools.TTLCache rather than growing this.
+_CACHE_MAX = 512
+_verified: dict[str, tuple[float, str]] = {}
+
+
+def _cached_user(token: str) -> str | None:
+    entry = _verified.get(token)
+    if entry is None:
+        return None
+    expires_at, user_id = entry
+    if expires_at <= time.monotonic():
+        _verified.pop(token, None)
+        return None
+    return user_id
+
+
+def _remember(token: str, user_id: str) -> None:
+    if _CACHE_SECONDS <= 0:
+        return
+    now = time.monotonic()
+    if len(_verified) >= _CACHE_MAX:
+        for stale, (expires_at, _) in list(_verified.items()):
+            if expires_at <= now:
+                _verified.pop(stale, None)
+        if len(_verified) >= _CACHE_MAX:
+            _verified.clear()
+    _verified[token] = (now + _CACHE_SECONDS, user_id)
+
+
+def forget_tokens() -> None:
+    """Drop every cached verification. For tests."""
+    _verified.clear()
 
 
 def _bearer(authorization: str | None) -> str:
@@ -41,12 +91,21 @@ def current_user_id(authorization: str | None = Header(default=None)) -> str:
     """The signed-in user, from their Supabase access token.
 
     Verified by asking Supabase rather than by checking a signature locally.
-    That is a network round trip, but it needs no JWT secret in this service's
-    environment and it honours revocation — a signed-out or deleted user stops
-    working immediately, where a locally-verified token would keep passing
-    until it expired.
+    That needs no JWT secret in this service's environment and it honours
+    revocation, where a locally-verified token would keep passing until it
+    expired.
+
+    The answer is cached for [_CACHE_SECONDS], because that round trip was
+    being paid on every single request and the same token asks the same
+    question all conversation long. Revocation is then honoured within a
+    minute rather than instantly — see the note on the constant.
     """
     token = _bearer(authorization)
+
+    cached = _cached_user(token)
+    if cached is not None:
+        return cached
+
     try:
         response = service_client().auth.get_user(token)
     except SupabaseError:
@@ -58,6 +117,7 @@ def current_user_id(authorization: str | None = Header(default=None)) -> str:
     user = getattr(response, "user", None)
     if user is None or not getattr(user, "id", None):
         raise HTTPException(status_code=401, detail=_UNAUTHORIZED)
+    _remember(token, user.id)
     return user.id
 
 

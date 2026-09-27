@@ -3,8 +3,10 @@
 import logging
 from dataclasses import dataclass, field
 
+from app.core.concurrency import gather
 from app.core.llm import get_model
 from app.core.supabase_client import insert_message, set_chat_status
+from app.core.timing import timed
 from app.core.web_search import SearchResult, get_search
 from app.prompts import recommendation_prompt as prompts
 from app.services.context import ChatContext
@@ -41,10 +43,11 @@ def _decide_searches(context: ChatContext) -> list[str]:
     advice is worse than grounded advice and much better than no advice.
     """
     try:
-        result = get_model().complete_json(
-            system=prompts.SEARCH_SYSTEM,
-            user=prompts.SEARCH_USER.format(summary=context.summary()),
-        )
+        with timed("recommendation: search decision"):
+            result = get_model().complete_json(
+                system=prompts.SEARCH_SYSTEM,
+                user=prompts.SEARCH_USER.format(summary=context.summary()),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not decide on search, continuing without: %s", exc)
         return []
@@ -65,10 +68,21 @@ def _research(context: ChatContext) -> list[SearchResult]:
         return []
 
     search = get_search()
+    # Three lookups against an external search engine, each a second or two of
+    # pure waiting and none of them depending on the others. Run in a loop they
+    # were the second-largest thing on this endpoint after the generation
+    # itself; run together they cost one lookup.
+    with timed(f"recommendation: {len(queries)} searches"):
+        # A default argument, not a closure over `query` — a lambda capturing
+        # the loop variable would have every thread search the last query.
+        per_query = gather(*[(lambda q=q: search.search(q)) for q in queries])
+
+    # Flattened in query order, so the same queries always produce the same
+    # prompt whatever order the threads happened to finish in.
     results: list[SearchResult] = []
     seen: set[str] = set()
-    for query in queries:
-        for hit in search.search(query):
+    for hits in per_query:
+        for hit in hits:
             if hit.url in seen:
                 continue
             seen.add(hit.url)
@@ -93,17 +107,50 @@ def _render_research(results: list[SearchResult]) -> str:
     return prompts.RESEARCH_BLOCK.format(results=body)
 
 
+def _existing_recommendation(context: ChatContext) -> Recommendation | None:
+    """The recommendation already on this chat, if a retry finds one waiting.
+
+    A client retry after a dropped response — Render's cold start plus a long
+    generation is exactly the kind of call that can time out on the client
+    side after the server has already finished — would otherwise run the whole
+    research-and-generate pipeline again and insert a second, possibly
+    conflicting piece of advice into the same chat.
+    """
+    for message in context.messages:
+        if message.get("type") != "recommendation":
+            continue
+        metadata = message.get("metadata") or {}
+        return Recommendation(
+            text=message.get("answer_text") or "",
+            headline=metadata.get("headline") or "",
+            next_steps=metadata.get("next_steps") or [],
+            confidence=metadata.get("confidence") or "",
+            sources=[
+                SearchResult(title=s.get("title") or "", snippet="", url=s.get("url") or "")
+                for s in (metadata.get("sources") or [])
+                if s.get("url")
+            ],
+            message_id=message.get("id"),
+        )
+    return None
+
+
 def generate(context: ChatContext) -> Recommendation:
     """Research if needed, answer, then persist the answer and the chat's status."""
+    existing = _existing_recommendation(context)
+    if existing is not None:
+        return existing
+
     sources = _research(context)
 
-    result = get_model().complete_json(
-        system=prompts.RECOMMENDATION_SYSTEM,
-        user=prompts.RECOMMENDATION_USER.format(
-            summary=context.summary(),
-            research=_render_research(sources),
-        ),
-    )
+    with timed("recommendation: model"):
+        result = get_model().complete_json(
+            system=prompts.RECOMMENDATION_SYSTEM,
+            user=prompts.RECOMMENDATION_USER.format(
+                summary=context.summary(),
+                research=_render_research(sources),
+            ),
+        )
 
     text = (result.get("recommendation") or "").strip()
     if not text:
@@ -158,27 +205,50 @@ def generate(context: ChatContext) -> Recommendation:
     )
 
 
+def _already_recorded(context: ChatContext, message: str) -> bool:
+    """Whether [message] looks like it was already written and is only
+    waiting on a reply.
+
+    A dropped response after the user's turn was saved and before the model
+    replied looks, on retry, identical to a first attempt: same chat, same
+    text, sent again. The last message being that same free_text with nothing
+    after it is the signal — anything else (a reply already came back, or the
+    chat's last turn was something else entirely) means this is a genuinely
+    new message and must be written.
+    """
+    if not context.messages:
+        return False
+    last = context.messages[-1]
+    return (
+        last.get("type") == "free_text"
+        and (last.get("answer_text") or "") == message
+    )
+
+
 def follow_up(context: ChatContext, message: str) -> dict:
     """One turn of the continued conversation.
 
     The user's message is persisted before the model is called, so a model
     failure loses the reply — which they can retry — rather than what they
-    said, which they cannot get back.
+    said, which they cannot get back. [_already_recorded] is what keeps that
+    retry from writing the same turn twice.
     """
-    insert_message(
-        chat_id=context.chat["id"],
-        type="free_text",
-        answer_text=message,
-        metadata={"input_method": "typed"},
-    )
+    if not _already_recorded(context, message):
+        insert_message(
+            chat_id=context.chat["id"],
+            type="free_text",
+            answer_text=message,
+            metadata={"input_method": "typed"},
+        )
 
-    reply = get_model().complete(
-        system=prompts.FOLLOW_UP_SYSTEM,
-        user=prompts.FOLLOW_UP_USER.format(
-            summary=context.summary(),
-            message=message,
-        ),
-    ).strip()
+    with timed("follow-up: model"):
+        reply = get_model().complete(
+            system=prompts.FOLLOW_UP_SYSTEM,
+            user=prompts.FOLLOW_UP_USER.format(
+                summary=context.summary(),
+                message=message,
+            ),
+        ).strip()
 
     if not reply:
         from app.core.llm import ModelError

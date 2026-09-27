@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 
 
@@ -17,6 +17,19 @@ class AdaptiveAnswer(BaseModel):
     """
     message_id: str = Field(..., description="id of the question row being answered")
     text: str = Field(..., min_length=1, description="A chosen option, or free text")
+
+    @field_validator("text")
+    @classmethod
+    def _not_just_whitespace(cls, value: str) -> str:
+        # min_length counts characters, not content — " " passes it. A blank
+        # answer_text is falsy, which is exactly what the retry-idempotency in
+        # adaptive_engine.last_unanswered checks for: a whitespace-only answer
+        # would look identical to no answer at all, and the question would be
+        # marked answered forever without ever having been.
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value
+
     selections: Optional[List[str]] = Field(
         default=None,
         description=(

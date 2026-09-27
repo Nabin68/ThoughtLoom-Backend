@@ -7,6 +7,7 @@ reached.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 from supabase import Client, create_client
@@ -254,14 +255,20 @@ def insert_message(
     return result.data[0]
 
 
-def _metadata_of(message_id: str) -> dict:
-    """One message's metadata, for a caller about to write it back."""
+def _metadata_of(message_id: str, *, chat_id: str) -> dict:
+    """One message's metadata, for a caller about to write it back.
+
+    Scoped to [chat_id] for the same reason [answer_message] is: read is not
+    the dangerous half, but a metadata merge for a message in someone else's
+    chat is still a message in someone else's chat.
+    """
     try:
         result = (
             service_client()
             .table("messages")
             .select("metadata")
             .eq("id", message_id)
+            .eq("chat_id", chat_id)
             .maybe_single()
             .execute()
         )
@@ -274,6 +281,7 @@ def answer_message(
     message_id: str,
     answer_text: str,
     *,
+    chat_id: str,
     selections: list[str] | None = None,
 ) -> dict:
     """Fill in the answer on a question that was already asked.
@@ -285,13 +293,24 @@ def answer_message(
     [selections] are the options a multi-select answer ticked. [answer_text]
     already carries them joined and remains what every reader uses; these are
     kept so a later reader does not have to find the joins in a sentence.
+
+    [chat_id] must be the chat [app.core.auth.authorize_chat] already proved
+    the caller owns. `message_id` alone is not enough — it is a client-supplied
+    value with no relationship to the caller's identity, and this runs with the
+    service-role key, which does not check Row Level Security. Without the
+    `chat_id` filter below, any signed-in user who learned another user's
+    message id (a stale session, a shared link, a guessed uuid) could overwrite
+    a stranger's answer by citing their own, unrelated chat_id.
     """
     updates: dict = {"answer_text": answer_text}
     if selections:
         # An update replaces jsonb wholesale rather than merging into it, so the
         # question's own options and round have to be carried across by hand or
         # the answer erases the question it belongs to.
-        updates["metadata"] = {**_metadata_of(message_id), "selected": selections}
+        updates["metadata"] = {
+            **_metadata_of(message_id, chat_id=chat_id),
+            "selected": selections,
+        }
 
     try:
         result = (
@@ -299,6 +318,7 @@ def answer_message(
             .table("messages")
             .update(updates)
             .eq("id", message_id)
+            .eq("chat_id", chat_id)
             .execute()
         )
     except Exception as exc:  # noqa: BLE001
@@ -403,14 +423,13 @@ def upsert_memory(
     return result.data[0]
 
 
-def touch_chat(chat_id: str) -> None:
-    """Bump the chat's activity time so history stays ordered by real use.
+# One long-lived thread for the fire-and-forget touch below. Small on purpose:
+# these writes may queue behind each other and that is fine, because nobody is
+# waiting on them.
+_background = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tl-bg")
 
-    Best-effort: the message is already saved by the time this runs, and losing
-    a sort key is not worth failing a request the user is waiting on. The
-    database's own touch_updated_at trigger does the real work; this just has to
-    make it a real update.
-    """
+
+def _touch_now(chat_id: str) -> None:
     try:
         from datetime import datetime, timezone
 
@@ -419,3 +438,17 @@ def touch_chat(chat_id: str) -> None:
         ).eq("id", chat_id).execute()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not touch chat %s: %s", chat_id, exc)
+
+
+def touch_chat(chat_id: str) -> None:
+    """Bump the chat's activity time so history stays ordered by real use.
+
+    Fired and forgotten. This was already best-effort — losing a sort key is not
+    worth failing a request over — but it was best-effort *on the critical
+    path*, adding a Supabase round trip to every message written while the user
+    watched a spinner. Nobody is waiting on a timestamp, so nobody waits on it.
+
+    The database's own touch_updated_at trigger does the real work; this just
+    has to make it a real update.
+    """
+    _background.submit(_touch_now, chat_id)

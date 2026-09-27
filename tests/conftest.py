@@ -92,14 +92,14 @@ class FakeDb:
         self.messages.append(row)
         return row
 
-    def answer_message(self, message_id, answer_text, *, selections=None):
+    def answer_message(self, message_id, answer_text, *, chat_id, selections=None):
         for row in self.messages:
-            if row["id"] == message_id:
+            if row["id"] == message_id and row["chat_id"] == chat_id:
                 row["answer_text"] = answer_text
                 if selections:
                     row["metadata"] = {**row["metadata"], "selected": selections}
                 return row
-        raise AssertionError(f"no such message {message_id}")
+        raise AssertionError(f"no such message {message_id} in chat {chat_id}")
 
     def set_chat_status(self, chat_id, status):
         self.chats.setdefault(chat_id, {})["status"] = status

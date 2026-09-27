@@ -14,8 +14,20 @@ rendered before either existed.
 
 from dataclasses import dataclass, field
 
-from app.core.supabase_client import fetch_memory_rows, fetch_messages, fetch_profile
-from app.services.recall import RelatedChat, find_related, keywords_from
+from app.core.concurrency import gather
+from app.core.supabase_client import (
+    fetch_memory_rows,
+    fetch_messages,
+    fetch_past_chats,
+    fetch_profile,
+)
+from app.core.timing import timed
+from app.services.recall import (
+    MAX_CANDIDATES,
+    RelatedChat,
+    find_related,
+    keywords_from,
+)
 
 # The onboarding basic profile, in the order a human would want it, with the
 # labels the app asked under. Keys must match onboarding_questions.dart.
@@ -31,6 +43,7 @@ _PROFILE_LABELS: list[tuple[str, str]] = [
     ("financial_context", "Money situation"),
     ("relationship_status", "Relationship"),
     ("decision_style", "Decides best by"),
+    ("family_context", "At home"),
     ("anything_else", "Also mentioned"),
 ]
 
@@ -60,6 +73,12 @@ Times you have talked with them before that look related to this one. Refer back
 where it earns its place — if they are circling the same decision a third time,
 that is worth naming plainly rather than answering as though it were the first.
 Do not force it."""
+
+_PROBLEM_PREAMBLE = """WHAT THEY CAME HERE WITH, IN THEIR OWN WORDS
+This is the decision. Everything you ask must serve it. It is repeated here on
+its own because it is the one thing in this prompt that is easiest to drift away
+from once the profile and the scripted answers are in front of you."""
+
 
 # What the client joins a multi-select answer with, and so what takes it back
 # apart. See AdaptiveAnswer in app/schemas/request_response.py, which defines
@@ -194,6 +213,42 @@ class ChatContext:
         )
         return keywords_from(said)
 
+    def stated_problem(self) -> str:
+        """The description they wrote or dictated before the generated
+        questions began. Empty if they skipped straight past it.
+
+        The *first* free_text turn specifically: the later ones are their
+        replies in the continued conversation, which are answers, not the
+        question that brought them here.
+        """
+        for message in self.messages:
+            if message.get("type") == "free_text":
+                return " ".join((message.get("answer_text") or "").split())
+        return ""
+
+    def latest_answer(self) -> str:
+        """The last thing they actually said, rendered as the prompt sees it.
+
+        It is already in the transcript — near the bottom of a block that can
+        run to a couple of thousand words. Repeating it at the very end, as the
+        last thing the model reads before it writes, is what keeps the next
+        question following from their answer rather than from the general shape
+        of the conversation.
+        """
+        for message in reversed(self.messages):
+            if message.get("type") in ("recommendation", "assistant_reply"):
+                continue
+            answer = (message.get("answer_text") or "").strip()
+            if not answer:
+                continue
+            question = (message.get("question_text") or "").strip()
+            chosen = _selections(message)
+            said = " | ".join(chosen) if chosen else answer
+            if question:
+                return f'You asked: "{question}"\nThey answered: {said}'
+            return f'They wrote: "{said}"'
+        return "(nothing yet - this is the first question of the chat)"
+
     def transcript(self) -> str:
         """The conversation so far, in the order it happened.
 
@@ -214,9 +269,29 @@ class ChatContext:
 
             if kind == "intake":
                 lines.append(f"Q (scripted): {question}")
-                lines.append(f"A: {answer or '(skipped)'}")
+                # The same treatment the generated questions have always had.
+                # The scripted opening is multi-select too, and it is most of
+                # what is known when the *first* generated question gets
+                # written — so reading "she does not give me time; I do not
+                # feel valued" as one hedged sentence rather than two
+                # independent ticks was getting the early questions wrong at
+                # exactly the point where there is least else to go on.
+                chosen = _selections(message)
+                if chosen:
+                    lines.append(f"A (chose several): {' | '.join(chosen)}")
+                else:
+                    lines.append(f"A: {answer or '(skipped)'}")
             elif kind == "adaptive_question":
                 lines.append(f"Q (you asked): {question}")
+                # The options *you* offered, so you do not offer them again.
+                # Without this the model cannot see its own earlier choice sets
+                # and will re-serve a near-identical one three rounds later,
+                # which reads to the user as not having been listened to.
+                offered = (message.get("metadata") or {}).get("options")
+                if isinstance(offered, list) and offered:
+                    shown = " | ".join(o for o in offered if isinstance(o, str))
+                    if shown:
+                        lines.append(f"   (options you gave: {shown})")
                 chosen = _selections(message)
                 if chosen:
                     lines.append(f"A (chose several): {' | '.join(chosen)}")
@@ -252,6 +327,11 @@ class ChatContext:
             blocks.append(f"{_RELATED_PREAMBLE}\n\n{recalled}")
 
         blocks.append(f"TOPIC: {self.category}")
+
+        problem = self.stated_problem()
+        if problem:
+            blocks.append(f'{_PROBLEM_PREAMBLE}\n\n"{problem}"')
+
         blocks.append(f"THE CONVERSATION SO FAR:\n{self.transcript()}")
         return "\n\n".join(blocks)
 
@@ -264,19 +344,41 @@ def load_context(chat: dict, *, recall: bool = True) -> ChatContext:
     queries to be told about chats they must not fold in.
     """
     user_id = chat["user_id"]
-    context = ChatContext(
-        chat=chat,
-        profile=fetch_profile(user_id),
-        messages=fetch_messages(chat["id"]),
-    )
-    if not recall:
-        return context
+    chat_id = chat["id"]
 
-    context.memories = fetch_memory_rows(user_id)
-    context.related = find_related(
-        user_id=user_id,
-        chat_id=chat["id"],
-        category=context.category,
-        keywords=context.keywords(),
+    if not recall:
+        with timed("load_context(recall=False)"):
+            profile, messages = gather(
+                lambda: fetch_profile(user_id),
+                lambda: fetch_messages(chat_id),
+            )
+        return ChatContext(chat=chat, profile=profile, messages=messages)
+
+    # Four reads that know nothing about each other, so they go at once. One
+    # after another they were four Supabase round trips stacked in front of a
+    # user watching a spinner; together they cost one.
+    with timed("load_context: reads"):
+        profile, messages, memories, candidates = gather(
+            lambda: fetch_profile(user_id),
+            lambda: fetch_messages(chat_id),
+            lambda: fetch_memory_rows(user_id),
+            lambda: fetch_past_chats(
+                user_id, exclude_chat_id=chat_id, limit=MAX_CANDIDATES
+            ),
+        )
+
+    context = ChatContext(
+        chat=chat, profile=profile, messages=messages, memories=memories
     )
+    # The rest genuinely is sequential: the keyword search needs the transcript
+    # to know what to search for, and the past advice to quote is not known
+    # until the scoring says which chats made the cut.
+    with timed("load_context: recall"):
+        context.related = find_related(
+            user_id=user_id,
+            chat_id=chat_id,
+            category=context.category,
+            keywords=context.keywords(),
+            candidates=candidates,
+        )
     return context

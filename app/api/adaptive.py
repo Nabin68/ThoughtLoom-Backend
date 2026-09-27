@@ -45,6 +45,7 @@ async def adaptive_question(
                 answer_message,
                 request.answer.message_id,
                 request.answer.text,
+                chat_id=chat["id"],
                 selections=request.answer.selections,
             )
 
