@@ -84,7 +84,6 @@ class TestColdStart:
             memories=[{"category": None, "summary": "", "facts": []}]
         )
 
-        assert context.is_first_chat
         assert "WHAT YOU ALREADY KNOW" not in context.summary()
 
 
@@ -98,7 +97,6 @@ class TestMemoryInThePrompt:
 
         assert "WHAT YOU ALREADY KNOW" in summary
         assert "- Lives in Pune." in summary
-        assert not context.is_first_chat
 
     def test_another_categorys_memory_is_not_shown(self):
         context = context_with(
@@ -145,13 +143,6 @@ class TestRelatedInThePrompt:
         assert "Whether to keep paying Ravi's fees" in summary
         assert "March 2026" in summary
         assert "Keep paying, but tell him it stops in June." in summary
-
-    def test_related_chats_alone_are_enough_to_warm_the_prompt(self):
-        # Memory merging can fail, or simply not have run yet. Past chats are a
-        # second, independent route to "we have met before".
-        context = context_with(related=[RELATED])
-
-        assert not context.is_first_chat
 
 
 class TestTranscript:

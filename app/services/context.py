@@ -129,12 +129,6 @@ class ChatContext:
         return self.chat.get("category", "other")
 
     @property
-    def is_first_chat(self) -> bool:
-        """No memory and no history — this person is new. The prompts must read
-        exactly as they did before any of this existed."""
-        return not self.memory_lines() and not self.related
-
-    @property
     def adaptive_rounds(self) -> int:
         """How many questions the model has already asked."""
         return sum(1 for m in self.messages if m.get("type") == "adaptive_question")
@@ -154,10 +148,6 @@ class ChatContext:
             ):
                 return message
         return None
-
-    @property
-    def has_recommendation(self) -> bool:
-        return any(m.get("type") == "recommendation" for m in self.messages)
 
     def profile_lines(self) -> str:
         """The durable facts. Skipped answers are simply absent."""
